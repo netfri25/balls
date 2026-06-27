@@ -2,7 +2,6 @@
 
 #include <stdio.h>
 #include <assert.h>
-#include <xmmintrin.h>
 
 
 #ifdef NAIVE
@@ -14,7 +13,6 @@
 
 int main(void) {
     SetTraceLogLevel(LOG_ERROR);
-    _mm_setcsr(_mm_getcsr() | _MM_MASK_DIV_ZERO);
 
     // srand(time(NULL));
     InitWindow(800, 800, "window");

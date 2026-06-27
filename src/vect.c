@@ -90,6 +90,7 @@ void init_state(
     float min_vy,
     float max_vy
 ) {
+    _mm_setcsr(_mm_getcsr() | _MM_MASK_DIV_ZERO);
     self->len = len;
     self->r  = aligned_alloc(64, len * sizeof *self->r);
     self->px = aligned_alloc(64, len * sizeof *self->px);
