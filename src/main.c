@@ -6,6 +6,7 @@
 
 
 #if defined(AVX512)
+#include "avx512.c"
 #elif defined(AVX2)
 #include "avx2.c"
 #else

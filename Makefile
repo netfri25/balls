@@ -4,7 +4,7 @@ SRC = src
 # CC = gcc
 # CFLAGS += -flax-vector-conversions
 
-CFLAGS += -O3 -std=c11 -mtune=native -march=native -Wall -Wextra -I./thirdparty
+CFLAGS += -g -O3 -std=c11 -mtune=native -march=native -Wall -Wextra -I./thirdparty
 
 all: ${BUILD} ${BUILD}/naive
 
@@ -18,6 +18,11 @@ avx2: ${BUILD}/avx2
 
 ${BUILD}/avx2: ${SRC}/main.c ${SRC}/avx2.c ${SRC}/common.h
 	${CC} ${CFLAGS} ${SRC}/main.c thirdparty/libraylib.a -lm -o ${BUILD}/avx2 -DAVX2
+
+avx512: ${BUILD}/avx512
+
+${BUILD}/avx512: ${SRC}/main.c ${SRC}/avx512.c ${SRC}/common.h
+	${CC} ${CFLAGS} ${SRC}/main.c thirdparty/libraylib.a -lm -o ${BUILD}/avx512 -DAVX512
 
 clean:
 	rm -rf ${BUILD}
