@@ -116,48 +116,6 @@ void destroy_state(struct State* self) {
 }
 
 
-// NOTE: slower
-struct IndexPairVec* find_collisions2(struct State const* self) {
-    static struct IndexPairVec pairs = {0};
-    __v16su const offsets = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-
-    for (uint32_t i = 0; i + 1 < self->len; i++) {
-        float const px = self->px[i];
-        float const py = self->py[i];
-        float const r  = self->r[i];
-        __v16su const is = _mm512_set1_epi32(i);
-
-        for (uint32_t j = i + 1; j < self->len; j += 16) {
-            uint32_t const leftover = self->len - j;
-            uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-            __mmask16 mask = _mm512_int2mask((1 << bits_to_set) - 1);
-
-            __v16sf const pxs = _mm512_maskz_loadu_ps(mask, &self->px[j]);
-            __v16sf const pys = _mm512_maskz_loadu_ps(mask, &self->py[j]);
-            __v16sf const rs  = _mm512_maskz_loadu_ps(mask, &self->r[j]);
-
-            __v16sf const dx = pxs - px;
-            __v16sf const dy = pys - py;
-            __v16sf const distance_squared = dy*dy + dx*dx;
-            __v16sf const radius_sum = rs + r;
-            __v16sf const distance_squared_for_collision = radius_sum * radius_sum;
-
-            mask &= _mm512_cmp_ps_mask(distance_squared, distance_squared_for_collision, _CMP_LE_OQ);
-            uint32_t const count = _mm_popcnt_u32(mask);
-
-            __v16su const js = (__v16su) _mm512_set1_epi32(j) + offsets;
-
-            IndexPairVec_reserve_additional(&pairs, count);
-
-            _mm512_mask_compressstoreu_epi32(pairs.is + pairs.count, mask, is);
-            _mm512_mask_compressstoreu_epi32(pairs.js + pairs.count, mask, js);
-            pairs.count += count;
-        }
-    }
-
-    return &pairs;
-}
-
 struct IndexPairVec* find_collisions(struct State const* self) {
     static struct IndexPairVec pairs = {0};
     __v16su const offsets = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
