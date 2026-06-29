@@ -1,5 +1,6 @@
 #include "raylib.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <assert.h>
 
@@ -69,7 +70,9 @@ int main(void) {
         EndDrawing();
     }
 
-    printf("update avg: %.03fms\n", state.sampler.avg);
+    printf("update avg:     %.03fms\n", state.sampler.avg);
+    printf("update lowest:  %.03fms\n", state.sampler.lowest);
+    printf("update highest: %.03fms\n", state.sampler.highest);
 
     destroy_state(&state);
     CloseWindow();

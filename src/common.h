@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 
 #define CIRCLE_COUNT (16*600)
 #define MIN_RADIUS 2
@@ -11,6 +12,8 @@
 struct Sampler {
     size_t count;
     double avg;
+    double highest;
+    double lowest;
 };
 
 #define MEASURE(sampler, block) \
@@ -21,6 +24,9 @@ struct Sampler {
         double const update_time_ms = (double) elapsed / (double) CLOCKS_PER_SEC * 1000; \
         (sampler)->avg = ((sampler)->avg * (sampler)->count + update_time_ms) / ((sampler)->count + 1); \
         (sampler)->count++; \
+        (sampler)->highest = fmaxf((sampler)->highest, update_time_ms); \
+        if ((sampler)->lowest == 0) (sampler)->lowest = INFINITY; \
+        (sampler)->lowest = fminf((sampler)->lowest, update_time_ms); \
     } while (0)
 
 #define da_reserve_additional(da, expected_additional_capacity) \
