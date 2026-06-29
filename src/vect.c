@@ -150,10 +150,6 @@ struct IndexPairVec* find_collisions(struct State const* self) {
         for (uint32_t j = i; j < self->len; j++) {
             uint8_t bit_mask = 0xFF;
 
-            if (j == i + 8 - 1) {
-                continue;
-            }
-
             if (j >= i && j < i + 8) {
                 bit_mask &= (0xFF << (j - i + 1));
             }
@@ -193,7 +189,7 @@ struct IndexPairVec* find_collisions(struct State const* self) {
         float const pys = self->py[i];
         float const rs  = self->r[i];
 
-        for (uint32_t j = i; j < self->len; j++) {
+        for (uint32_t j = i + 1; j < self->len; j++) {
             float const px = self->px[j];
             float const py = self->py[j];
             float const r = self->r[j];
@@ -270,7 +266,7 @@ void update_wall_collisions(struct State const* self) {
 
         cmp_mask = _mm256_cmp_ps(px + r, max_x, _CMP_GT_OQ);
         _mm256_maskstore_ps(&self->px[i], cmp_mask, max_x - r);
-        abs = _mm256_and_ps(vx, _mm256_set1_epi32(0x80000000));
+        abs = _mm256_or_ps(vx, _mm256_set1_epi32(0x80000000));
         _mm256_maskstore_ps(&self->vx[i], cmp_mask, abs);
 
         cmp_mask = _mm256_cmp_ps(py, r, _CMP_LT_OQ);
@@ -280,7 +276,7 @@ void update_wall_collisions(struct State const* self) {
 
         cmp_mask = _mm256_cmp_ps(py + r, max_y, _CMP_GT_OQ);
         _mm256_maskstore_ps(&self->py[i], cmp_mask, max_y - r);
-        abs = _mm256_and_ps(vy, _mm256_set1_epi32(0x80000000));
+        abs = _mm256_or_ps(vy, _mm256_set1_epi32(0x80000000));
         _mm256_maskstore_ps(&self->vy[i], cmp_mask, abs);
     }
 
@@ -373,7 +369,7 @@ void update_static_collisions(
         float const dx = px1 - px2;
         float const dy = py1 - py2;
 
-        float const rdistance = sqrtf(dx*dx + dy*dy);
+        float const rdistance = 1.0 / sqrtf(dx*dx + dy*dy);
         float const radius_sum = r1 + r2;
 
         float const not_really_overlap = 0.5 * (1. - radius_sum * rdistance);
@@ -431,10 +427,10 @@ void update_dynamic_collisions(
         vx2 += p * r1 * nx;
         vy2 += p * r1 * ny;
 
-        scatter(self->vx, (uint32_t*) &is, (float*) &vx1, sizeof *self->vx);
-        scatter(self->vy, (uint32_t*) &is, (float*) &vy1, sizeof *self->vy);
-        scatter(self->vx, (uint32_t*) &js, (float*) &vx2, sizeof *self->vx);
-        scatter(self->vy, (uint32_t*) &js, (float*) &vy2, sizeof *self->vy);
+        scatter(self->vx, (uint32_t*) &is, (float*) &vx1, 8);
+        scatter(self->vy, (uint32_t*) &is, (float*) &vy1, 8);
+        scatter(self->vx, (uint32_t*) &js, (float*) &vx2, 8);
+        scatter(self->vy, (uint32_t*) &js, (float*) &vy2, 8);
     }
 
     for (; index < collisions->count; index++) {
@@ -457,7 +453,7 @@ void update_dynamic_collisions(
         float const dx = px2 - px1;
         float const dy = py2 - py1;
 
-        float const inv_distance = 1. / sqrtf(dx*dx + dy*dy);
+        float const inv_distance = 1.0 / sqrtf(dx*dx + dy*dy);
 
         float const nx = inv_distance * dx;
         float const ny = inv_distance * dy;
