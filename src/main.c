@@ -5,10 +5,11 @@
 #include <assert.h>
 
 
-#ifdef NAIVE
-#include "naive.c"
+#if defined(AVX512)
+#elif defined(AVX2)
+#include "avx2.c"
 #else
-#include "vect.c"
+#include "naive.c"
 #endif
 
 #define ITERATIONS 20
