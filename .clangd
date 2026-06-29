@@ -1,5 +1,6 @@
 CompileFlags:
   Add:
+    - "-xc"
     - "-std=c11"
     - "-march=znver2"
     - "-mtune=znver2"
