@@ -10,6 +10,7 @@
 #include "vect.c"
 #endif
 
+#define ITERATIONS 20
 
 int main(void) {
     SetTraceLogLevel(LOG_ERROR);
@@ -55,8 +56,11 @@ int main(void) {
     );
 
     while (!WindowShouldClose()) {
-        float const dt = GetFrameTime();
-        MEASURE(&state.sampler, update(&state, dt));
+        float const total_dt = GetFrameTime();
+        float const dt = total_dt / ITERATIONS;
+        for (uint32_t i = 0; i < ITERATIONS; i++) {
+            MEASURE(&state.sampler, update(&state, dt));
+        }
 
         BeginDrawing();
             ClearBackground(BLACK);
