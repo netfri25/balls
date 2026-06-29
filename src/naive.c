@@ -47,6 +47,7 @@ void init_state(
     float min_vy,
     float max_vy
 ) {
+    self->sampler = (struct Sampler){0};
     self->len = len;
     self->circles = malloc(len * sizeof *self->circles);
 

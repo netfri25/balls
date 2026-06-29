@@ -92,6 +92,7 @@ void init_state(
     float max_vy
 ) {
     _mm_setcsr(_mm_getcsr() | _MM_MASK_DIV_ZERO);
+    self->sampler = (struct Sampler){0};
     self->len = len;
     self->r  = aligned_alloc(64, len * sizeof *self->r);
     self->px = aligned_alloc(64, len * sizeof *self->px);
