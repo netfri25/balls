@@ -1,8 +1,8 @@
 CompileFlags:
   Add:
     - "-std=c11"
-    - "-march=native"
-    - "-mtune=native"
+    - "-march=znver2"
+    - "-mtune=znver2"
     - "-Wall"
     - "-Wextra"
     - "-I../thirdparty"

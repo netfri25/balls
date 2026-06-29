@@ -3,6 +3,7 @@
 #include "common.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <immintrin.h>
 #include <stdio.h>
@@ -63,14 +64,14 @@ static void IndexPairVec_reserve_additional(struct IndexPairVec* self, size_t ex
         self->is,
         self->count    * sizeof *self->is,
         self->capacity * sizeof *self->is,
-        16 * sizeof *self->is
+        8 * sizeof *self->is
     );
 
     self->js = aligned_realloc(
         self->js,
         self->count    * sizeof *self->js,
         self->capacity * sizeof *self->js,
-        16 * sizeof *self->js
+        8 * sizeof *self->js
     );
 
     assert(self->is != NULL && self->js != NULL && ":(");
@@ -115,98 +116,103 @@ void destroy_state(struct State* self) {
     free(self->vy);
 }
 
+static inline __v8su expand_mask8(uint8_t mask) {
+    __m256 const lookup = _mm256_setr_epi32(0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80);
+    __m256 const big_mask = _mm256_set1_epi32(mask);
+    return _mm256_cmpeq_epi32(lookup, _mm256_and_si256(lookup, big_mask));
+}
 
-// NOTE: slower
-struct IndexPairVec* find_collisions2(struct State const* self) {
-    static struct IndexPairVec pairs = {0};
-    __v16su const offsets = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+static inline void compress(uint32_t* target, __v8su mask, __v8su values) {
+    uint32_t count = 0;
 
-    for (uint32_t i = 0; i + 1 < self->len; i++) {
-        float const px = self->px[i];
-        float const py = self->py[i];
-        float const r  = self->r[i];
-        __v16su const is = _mm512_set1_epi32(i);
+    for (size_t i = 0; i < 8; i++) {
+        uint32_t const mask_value = ((uint32_t*) &mask)[i];
+        uint32_t const value = ((uint32_t*) &values)[i];
 
-        for (uint32_t j = i + 1; j < self->len; j += 16) {
-            uint32_t const leftover = self->len - j;
-            uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-            __mmask16 mask = _mm512_int2mask((1 << bits_to_set) - 1);
-
-            __v16sf const pxs = _mm512_maskz_loadu_ps(mask, &self->px[j]);
-            __v16sf const pys = _mm512_maskz_loadu_ps(mask, &self->py[j]);
-            __v16sf const rs  = _mm512_maskz_loadu_ps(mask, &self->r[j]);
-
-            __v16sf const dx = pxs - px;
-            __v16sf const dy = pys - py;
-            __v16sf const distance_squared = dy*dy + dx*dx;
-            __v16sf const radius_sum = rs + r;
-            __v16sf const distance_squared_for_collision = radius_sum * radius_sum;
-
-            mask &= _mm512_cmp_ps_mask(distance_squared, distance_squared_for_collision, _CMP_LE_OQ);
-            uint32_t const count = _mm_popcnt_u32(mask);
-
-            __v16su const js = (__v16su) _mm512_set1_epi32(j) + offsets;
-
-            IndexPairVec_reserve_additional(&pairs, count);
-
-            _mm512_mask_compressstoreu_epi32(pairs.is + pairs.count, mask, is);
-            _mm512_mask_compressstoreu_epi32(pairs.js + pairs.count, mask, js);
-            pairs.count += count;
+        if (mask_value != 0) {
+            target[count++] = value;
         }
     }
-
-    return &pairs;
 }
 
 struct IndexPairVec* find_collisions(struct State const* self) {
     static struct IndexPairVec pairs = {0};
-    __v16su const offsets = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    __v8su const offsets = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
 
-    for (uint32_t i = 0; i < self->len; i += 16) {
-        uint32_t const leftover = self->len - i;
-        uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-        __mmask16 const valid_is = _mm512_int2mask((1 << bits_to_set) - 1);
-        __v16su const is = i + offsets;
+    uint32_t i;
+    for (i = 0; i + 7 < self->len; i += 8) {
+        __v8su const is = i + offsets;
 
-        __v16sf const pxs = _mm512_maskz_load_ps(valid_is, &self->px[i]);
-        __v16sf const pys = _mm512_maskz_load_ps(valid_is, &self->py[i]);
-        __v16sf const rs  = _mm512_maskz_load_ps(valid_is, &self->r[i]);
+        __v8sf const pxs = _mm256_load_ps(&self->px[i]);
+        __v8sf const pys = _mm256_load_ps(&self->py[i]);
+        __v8sf const rs  = _mm256_load_ps(&self->r[i]);
 
         for (uint32_t j = i; j < self->len; j++) {
-            __mmask16 mask = valid_is;
+            uint8_t bit_mask = 0xFF;
 
-            if (j == i + 15) {
+            if (j == i + 8 - 1) {
                 continue;
             }
 
-            if (j >= i && j < i + 16) {
-                mask &= _mm512_int2mask(0xFFFF << (j - i + 1));
+            if (j >= i && j < i + 8) {
+                bit_mask &= (0xFF << (j - i + 1));
             }
+
+            __v8su mask = expand_mask8(bit_mask);
 
             float const px = self->px[j];
             float const py = self->py[j];
             float const r = self->r[j];
 
-            __v16sf const dx = pxs - px;
-            __v16sf const dy = pys - py;
-            __v16sf const distance_squared = dy*dy + dx*dx;
-            __v16sf const radius_sum = rs + r;
-            __v16sf const distance_squared_for_collision = radius_sum * radius_sum;
+            __v8sf const dx = pxs - px;
+            __v8sf const dy = pys - py;
+            __v8sf const distance_squared = dy*dy + dx*dx;
+            __v8sf const radius_sum = rs + r;
+            __v8sf const distance_squared_for_collision = radius_sum * radius_sum;
 
-            mask &= _mm512_cmp_ps_mask(distance_squared, distance_squared_for_collision, _CMP_LE_OQ);
+            mask &= (__v8su) _mm256_cmp_ps(distance_squared, distance_squared_for_collision, _CMP_LE_OQ);
 
-            if (mask == 0) {
+            if (_mm256_testz_si256(mask, mask)) {
                 continue;
             }
 
-            __v16su const js = _mm512_set1_epi32(j);
+            __v8su const js = _mm256_set1_epi32(j);
 
-            uint32_t const count = _mm_popcnt_u32(mask);
+            bit_mask = _mm256_movemask_ps(mask);
+            uint32_t const count = _mm_popcnt_u32(bit_mask);
             IndexPairVec_reserve_additional(&pairs, count);
 
-            _mm512_mask_compressstoreu_epi32(pairs.is + pairs.count, mask, is);
-            _mm512_mask_compressstoreu_epi32(pairs.js + pairs.count, mask, js);
+            compress(pairs.is + pairs.count, mask, is);
+            compress(pairs.js + pairs.count, mask, js);
             pairs.count += count;
+        }
+    }
+
+    for (; i < self->len; i++) {
+        float const pxs = self->px[i];
+        float const pys = self->py[i];
+        float const rs  = self->r[i];
+
+        for (uint32_t j = i; j < self->len; j++) {
+            float const px = self->px[j];
+            float const py = self->py[j];
+            float const r = self->r[j];
+
+            float const dx = pxs - px;
+            float const dy = pys - py;
+            float const distance_squared = dy*dy + dx*dx;
+            float const radius_sum = rs + r;
+            float const distance_squared_for_collision = radius_sum * radius_sum;
+
+            if (distance_squared > distance_squared_for_collision) {
+                continue;
+            }
+
+            IndexPairVec_reserve_additional(&pairs, 1);
+
+            pairs.is[pairs.count] = i;
+            pairs.js[pairs.count] = j;
+            pairs.count++;
         }
     }
 
@@ -214,69 +220,102 @@ struct IndexPairVec* find_collisions(struct State const* self) {
 }
 
 void update_positions(struct State const* self, float dt) {
-    __m512 const dts = _mm512_set1_ps(dt);
+    __m256 const dts = _mm256_set1_ps(dt);
 
-    for (uint32_t i = 0; i < self->len; i += 16) {
-        uint32_t const leftover = self->len - i;
-        uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-        __mmask16 const mask = _mm512_int2mask((1 << bits_to_set) - 1);
+    uint32_t i;
 
-        __v16sf px = _mm512_maskz_load_ps(mask, &self->px[i]);
-        __v16sf py = _mm512_maskz_load_ps(mask, &self->py[i]);
-        __v16sf const vx = _mm512_maskz_load_ps(mask, &self->vx[i]);
-        __v16sf const vy = _mm512_maskz_load_ps(mask, &self->vy[i]);
+    for (i = 0; i + 7 < self->len; i += 8) {
+        __v8sf px = _mm256_load_ps(&self->px[i]);
+        __v8sf py = _mm256_load_ps(&self->py[i]);
+        __v8sf const vx = _mm256_load_ps(&self->vx[i]);
+        __v8sf const vy = _mm256_load_ps(&self->vy[i]);
 
-        px = _mm512_fmadd_ps(vx, dts, px);
-        py = _mm512_fmadd_ps(vy, dts, py);
+        px = _mm256_fmadd_ps(vx, dts, px);
+        py = _mm256_fmadd_ps(vy, dts, py);
 
-        _mm512_mask_storeu_ps(&self->px[i], mask, px);
-        _mm512_mask_storeu_ps(&self->py[i], mask, py);
+        _mm256_storeu_ps(&self->px[i], px);
+        _mm256_storeu_ps(&self->py[i], py);
+    }
+
+    for (; i < self->len; i++) {
+        float const vx = self->vx[i];
+        float const vy = self->vy[i];
+        self->px[i] += vx * dt;
+        self->py[i] += vy * dt;
     }
 }
 
 void update_wall_collisions(struct State const* self) {
-    __v16sf const max_x = _mm512_set1_ps(GetScreenWidth());
-    __v16sf const max_y = _mm512_set1_ps(GetScreenHeight());
+    float const single_max_x = GetScreenWidth();
+    float const single_max_y = GetScreenHeight();
 
-    for (uint32_t i = 0; i < self->len; i += 16) {
-        uint32_t const leftover = self->len - i;
-        uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-        __mmask16 const mask = _mm512_int2mask((1 << bits_to_set) - 1);
+    __v8sf const max_x = _mm256_set1_ps(single_max_x);
+    __v8sf const max_y = _mm256_set1_ps(single_max_y);
 
-        __v16sf r  = _mm512_maskz_load_ps(mask, &self->r[i]);
-        __v16sf px = _mm512_maskz_load_ps(mask, &self->px[i]);
-        __v16sf py = _mm512_maskz_load_ps(mask, &self->py[i]);
-        __v16sf vx = _mm512_maskz_load_ps(mask, &self->vx[i]);
-        __v16sf vy = _mm512_maskz_load_ps(mask, &self->vy[i]);
+    uint32_t i;
+    for (i = 0; i + 7 < self->len; i += 8) {
+        __v8sf const r  = _mm256_load_ps(&self->r[i]);
+        __v8sf const px = _mm256_load_ps(&self->px[i]);
+        __v8sf const py = _mm256_load_ps(&self->py[i]);
+        __v8sf const vx = _mm256_load_ps(&self->vx[i]);
+        __v8sf const vy = _mm256_load_ps(&self->vy[i]);
 
-        __mmask16 cmp_mask;
-        __v16sf abs;
+        __m256 cmp_mask;
+        __v8sf abs;
 
-        cmp_mask = mask & _mm512_cmp_ps_mask(px, r, _CMP_LT_OQ);
-        _mm512_mask_storeu_ps(&self->px[i], cmp_mask, r);
-        abs = _mm512_abs_ps(vx);
-        _mm512_mask_storeu_ps(&self->vx[i], cmp_mask, abs);
+        cmp_mask = _mm256_cmp_ps(px, r, _CMP_LT_OQ);
+        _mm256_maskstore_ps(&self->px[i], cmp_mask, r);
+        abs = _mm256_and_ps(vx, _mm256_set1_epi32(0x7FFFFFFF));
+        _mm256_maskstore_ps(&self->vx[i], cmp_mask, abs);
 
-        cmp_mask = mask & _mm512_cmp_ps_mask(py, r, _CMP_LT_OQ);
-        if (cmp_mask) {
-            _mm512_mask_storeu_ps(&self->py[i], cmp_mask, r);
-            abs = _mm512_abs_ps(vy);
-            _mm512_mask_storeu_ps(&self->vy[i], cmp_mask, abs);
+        cmp_mask = _mm256_cmp_ps(px + r, max_x, _CMP_GT_OQ);
+        _mm256_maskstore_ps(&self->px[i], cmp_mask, max_x - r);
+        abs = _mm256_and_ps(vx, _mm256_set1_epi32(0x80000000));
+        _mm256_maskstore_ps(&self->vx[i], cmp_mask, abs);
+
+        cmp_mask = _mm256_cmp_ps(py, r, _CMP_LT_OQ);
+        _mm256_maskstore_ps(&self->py[i], cmp_mask, r);
+        abs = _mm256_and_ps(vy, _mm256_set1_epi32(0x7FFFFFFF));
+        _mm256_maskstore_ps(&self->vy[i], cmp_mask, abs);
+
+        cmp_mask = _mm256_cmp_ps(py + r, max_y, _CMP_GT_OQ);
+        _mm256_maskstore_ps(&self->py[i], cmp_mask, max_y - r);
+        abs = _mm256_and_ps(vy, _mm256_set1_epi32(0x80000000));
+        _mm256_maskstore_ps(&self->vy[i], cmp_mask, abs);
+    }
+
+    for (; i < self->len; i++) {
+        float const r  = self->r[i];
+        float const px = self->px[i];
+        float const py = self->py[i];
+        float const vx = self->vx[i];
+        float const vy = self->vy[i];
+
+        if (px < r) {
+            self->px[i] = r;
+            self->vx[i] = fabsf(vx);
         }
 
-        cmp_mask = mask & _mm512_cmp_ps_mask(px + r, max_x, _CMP_GT_OQ);
-        if (cmp_mask) {
-            _mm512_mask_storeu_ps(&self->px[i], cmp_mask, max_x - r);
-            abs = -_mm512_abs_ps(vx);
-            _mm512_mask_storeu_ps(&self->vx[i], cmp_mask, abs);
+        if (px + r > single_max_x) {
+            self->px[i] = single_max_x - r;
+            self->vx[i] = -fabsf(vx);
         }
 
-        cmp_mask = mask & _mm512_cmp_ps_mask(py + r, max_y, _CMP_GT_OQ);
-        if (cmp_mask) {
-            _mm512_mask_storeu_ps(&self->py[i], cmp_mask, max_y - r);
-            abs = -_mm512_abs_ps(vy);
-            _mm512_mask_storeu_ps(&self->vy[i], cmp_mask, abs);
+        if (py < r) {
+            self->py[i] = r;
+            self->vy[i] = fabsf(vy);
         }
+
+        if (py + r > single_max_y) {
+            self->py[i] = single_max_y - r;
+            self->vy[i] = -fabsf(vy);
+        }
+    }
+}
+
+static inline void scatter(float* addr, uint32_t indices[], float values[], uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        addr[indices[i]] = values[i];
     }
 }
 
@@ -284,43 +323,72 @@ void update_static_collisions(
     struct State const* self,
     struct IndexPairVec const* collisions
 ) {
-    __v16sf const zerops = _mm512_setzero_ps();
+    uint32_t index;
 
-    for (uint32_t index = 0; index < collisions->count; index += 16) {
-        uint32_t const leftover = collisions->count - index;
-        uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-        __mmask16 const mask = _mm512_int2mask((1 << bits_to_set) - 1);
+    for (index = 0; index + 7 < collisions->count; index += 8) {
+        __v8su const is = _mm256_load_si256((void*) &collisions->is[index]);
+        __v8su const js = _mm256_load_si256((void*) &collisions->js[index]);
 
-        __v16su const is = _mm512_maskz_load_epi32(mask, &collisions->is[index]);
-        __v16su const js = _mm512_maskz_load_epi32(mask, &collisions->js[index]);
+        __v8sf px1 = _mm256_i32gather_ps(self->px, is, sizeof *self->px);
+        __v8sf px2 = _mm256_i32gather_ps(self->px, js, sizeof *self->px);
+        __v8sf py1 = _mm256_i32gather_ps(self->py, is, sizeof *self->py);
+        __v8sf py2 = _mm256_i32gather_ps(self->py, js, sizeof *self->py);
 
-        __v16sf px1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->px, sizeof *self->px);
-        __v16sf px2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->px, sizeof *self->px);
-        __v16sf py1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->py, sizeof *self->py);
-        __v16sf py2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->py, sizeof *self->py);
+        __v8sf const r1 = _mm256_i32gather_ps(self->r, is, sizeof *self->r);
+        __v8sf const r2 = _mm256_i32gather_ps(self->r, js, sizeof *self->r);
 
-        __v16sf const r1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->r, sizeof *self->r);
-        __v16sf const r2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->r, sizeof *self->r);
+        __v8sf const dx = px1 - px2;
+        __v8sf const dy = py1 - py2;
 
-        __v16sf const dx = px1 - px2;
-        __v16sf const dy = py1 - py2;
+        __v8sf const rdistance = _mm256_rsqrt_ps(dx*dx + dy*dy);
+        __v8sf const radius_sum = r1 + r2;
 
-        __v16sf const rdistance = _mm512_rsqrt14_ps(dx*dx + dy*dy);
-        __v16sf const radius_sum = r1 + r2;
-
-        __v16sf const not_really_overlap = 0.5 * (1. - radius_sum * rdistance);
-        __v16sf const offset_x = not_really_overlap * dx;
-        __v16sf const offset_y = not_really_overlap * dy;
+        __v8sf const not_really_overlap = 0.5 * (1. - radius_sum * rdistance);
+        __v8sf const offset_x = not_really_overlap * dx;
+        __v8sf const offset_y = not_really_overlap * dy;
 
         px1 -= offset_x;
         py1 -= offset_y;
-        _mm512_mask_i32scatter_ps(self->px, mask, is, px1, sizeof *self->px);
-        _mm512_mask_i32scatter_ps(self->py, mask, is, py1, sizeof *self->py);
+        scatter(self->px, (uint32_t*) &is, (float*) &px1, 8);
+        scatter(self->py, (uint32_t*) &is, (float*) &py1, 8);
 
         px2 += offset_x;
         py2 += offset_y;
-        _mm512_mask_i32scatter_ps(self->px, mask, js, px2, sizeof *self->px);
-        _mm512_mask_i32scatter_ps(self->py, mask, js, py2, sizeof *self->py);
+        scatter(self->px, (uint32_t*) &js, (float*) &px2, 8);
+        scatter(self->py, (uint32_t*) &js, (float*) &py2, 8);
+    }
+
+    for (; index < collisions->count; index++) {
+        uint32_t const i = collisions->is[index];
+        uint32_t const j = collisions->js[index];
+
+        float px1 = self->px[i];
+        float px2 = self->px[j];
+        float py1 = self->py[i];
+        float py2 = self->py[j];
+
+        float const r1 = self->r[i];
+        float const r2 = self->r[j];
+
+        float const dx = px1 - px2;
+        float const dy = py1 - py2;
+
+        float const rdistance = sqrtf(dx*dx + dy*dy);
+        float const radius_sum = r1 + r2;
+
+        float const not_really_overlap = 0.5 * (1. - radius_sum * rdistance);
+        float const offset_x = not_really_overlap * dx;
+        float const offset_y = not_really_overlap * dy;
+
+        px1 -= offset_x;
+        py1 -= offset_y;
+        self->px[i] = px1;
+        self->py[i] = py1;
+
+        px2 += offset_x;
+        py2 += offset_y;
+        self->px[j] = px2;
+        self->py[j] = py2;
     }
 }
 
@@ -328,50 +396,85 @@ void update_dynamic_collisions(
     struct State const* self,
     struct IndexPairVec const* collisions
 ) {
-    __v16sf const zerops = _mm512_setzero_ps();
+    uint32_t index;
+    for (index = 0; index + 7 < collisions->count; index += 8) {
+        __v8su const is = _mm256_load_si256((void*) &collisions->is[index]);
+        __v8su const js = _mm256_load_si256((void*) &collisions->js[index]);
 
-    for (uint32_t index = 0; index < collisions->count; index += 16) {
-        uint32_t const leftover = collisions->count - index;
-        uint32_t const bits_to_set = leftover >= 16 ? 16 : leftover;
-        __mmask16 const mask = _mm512_int2mask((1 << bits_to_set) - 1);
+        __v8sf const px1 = _mm256_i32gather_ps(self->px, is, sizeof *self->px);
+        __v8sf const px2 = _mm256_i32gather_ps(self->px, js, sizeof *self->px);
+        __v8sf const py1 = _mm256_i32gather_ps(self->py, is, sizeof *self->py);
+        __v8sf const py2 = _mm256_i32gather_ps(self->py, js, sizeof *self->py);
 
-        __v16su const is = _mm512_maskz_load_epi32(mask, &collisions->is[index]);
-        __v16su const js = _mm512_maskz_load_epi32(mask, &collisions->js[index]);
+        __v8sf vx1 = _mm256_i32gather_ps(self->vx, is, sizeof *self->vx);
+        __v8sf vx2 = _mm256_i32gather_ps(self->vx, js, sizeof *self->vx);
+        __v8sf vy1 = _mm256_i32gather_ps(self->vy, is, sizeof *self->vy);
+        __v8sf vy2 = _mm256_i32gather_ps(self->vy, js, sizeof *self->vy);
 
-        __v16sf const px1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->px, sizeof *self->px);
-        __v16sf const px2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->px, sizeof *self->px);
-        __v16sf const py1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->py, sizeof *self->py);
-        __v16sf const py2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->py, sizeof *self->py);
+        __v8sf const r1 = _mm256_i32gather_ps(self->r, is, sizeof *self->r);
+        __v8sf const r2 = _mm256_i32gather_ps(self->r, js, sizeof *self->r);
 
-        __v16sf vx1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->vx, sizeof *self->vx);
-        __v16sf vx2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->vx, sizeof *self->vx);
-        __v16sf vy1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->vy, sizeof *self->vy);
-        __v16sf vy2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->vy, sizeof *self->vy);
+        __v8sf const dx = px2 - px1;
+        __v8sf const dy = py2 - py1;
 
-        __v16sf const r1 = _mm512_mask_i32gather_ps(zerops, mask, is, self->r, sizeof *self->r);
-        __v16sf const r2 = _mm512_mask_i32gather_ps(zerops, mask, js, self->r, sizeof *self->r);
+        __v8sf const inv_distance = _mm256_rsqrt_ps(dx*dx + dy*dy);
 
-        __v16sf const dx = px2 - px1;
-        __v16sf const dy = py2 - py1;
+        __v8sf const nx = inv_distance * dx;
+        __v8sf const ny = inv_distance * dy;
 
-        __v16sf const inv_distance = _mm512_rsqrt14_ps(dx*dx + dy*dy);
-
-        __v16sf const nx = inv_distance * dx;
-        __v16sf const ny = inv_distance * dy;
-
-        __v16sf const kx = vx1 - vx2;
-        __v16sf const ky = vy1 - vy2;
-        __v16sf const p  = 2.0 * (nx*kx + ny*ky) / (r1 + r2);
+        __v8sf const kx = vx1 - vx2;
+        __v8sf const ky = vy1 - vy2;
+        __v8sf const p  = 2.0 * (nx*kx + ny*ky) / (r1 + r2);
 
         vx1 -= p * r2 * nx;
         vy1 -= p * r2 * ny;
         vx2 += p * r1 * nx;
         vy2 += p * r1 * ny;
 
-        _mm512_mask_i32scatter_ps(self->vx, mask, is, vx1, sizeof *self->vx);
-        _mm512_mask_i32scatter_ps(self->vy, mask, is, vy1, sizeof *self->vy);
-        _mm512_mask_i32scatter_ps(self->vx, mask, js, vx2, sizeof *self->vx);
-        _mm512_mask_i32scatter_ps(self->vy, mask, js, vy2, sizeof *self->vy);
+        scatter(self->vx, (uint32_t*) &is, (float*) &vx1, sizeof *self->vx);
+        scatter(self->vy, (uint32_t*) &is, (float*) &vy1, sizeof *self->vy);
+        scatter(self->vx, (uint32_t*) &js, (float*) &vx2, sizeof *self->vx);
+        scatter(self->vy, (uint32_t*) &js, (float*) &vy2, sizeof *self->vy);
+    }
+
+    for (; index < collisions->count; index++) {
+        uint32_t const i = collisions->is[index];
+        uint32_t const j = collisions->js[index];
+
+        float const px1 = self->px[i];
+        float const py1 = self->py[i];
+        float const px2 = self->px[j];
+        float const py2 = self->py[j];
+
+        float vx1 = self->vx[i];
+        float vy1 = self->vy[i];
+        float vx2 = self->vx[j];
+        float vy2 = self->vy[j];
+
+        float const r1 = self->r[i];
+        float const r2 = self->r[j];
+
+        float const dx = px2 - px1;
+        float const dy = py2 - py1;
+
+        float const inv_distance = 1. / sqrtf(dx*dx + dy*dy);
+
+        float const nx = inv_distance * dx;
+        float const ny = inv_distance * dy;
+
+        float const kx = vx1 - vx2;
+        float const ky = vy1 - vy2;
+        float const p  = 2.0 * (nx*kx + ny*ky) / (r1 + r2);
+
+        vx1 -= p * r2 * nx;
+        vy1 -= p * r2 * ny;
+        vx2 += p * r1 * nx;
+        vy2 += p * r1 * ny;
+
+        self->vx[i] = vx1;
+        self->vy[i] = vy1;
+        self->vx[j] = vx2;
+        self->vy[j] = vy2;
     }
 }
 
