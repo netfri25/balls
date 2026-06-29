@@ -4,7 +4,7 @@ SRC = src
 # CC = gcc
 # CFLAGS += -flax-vector-conversions
 
-CFLAGS += -O3 -std=c11 -mtune=native -march=native -Wall -Wextra -I./thirdparty
+CFLAGS += -g -O3 -std=c11 -mtune=native -march=native -Wall -Wextra -I./thirdparty
 
 all: ${BUILD} ${BUILD}/naive ${BUILD}/vect
 
