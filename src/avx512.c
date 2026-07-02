@@ -211,9 +211,11 @@ void update_wall_collisions(struct State const* self) {
         __v16sf abs;
 
         cmp_mask = mask & _mm512_cmp_ps_mask(px, r, _CMP_LT_OQ);
-        _mm512_mask_storeu_ps(&self->px[i], cmp_mask, r);
-        abs = _mm512_abs_ps(vx);
-        _mm512_mask_storeu_ps(&self->vx[i], cmp_mask, abs);
+        if (cmp_mask) {
+            _mm512_mask_storeu_ps(&self->px[i], cmp_mask, r);
+            abs = _mm512_abs_ps(vx);
+            _mm512_mask_storeu_ps(&self->vx[i], cmp_mask, abs);
+        }
 
         cmp_mask = mask & _mm512_cmp_ps_mask(py, r, _CMP_LT_OQ);
         if (cmp_mask) {
